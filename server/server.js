@@ -95,6 +95,14 @@ const base32 = require("thirty-two");
 const { UptimeKumaServer } = require("./uptime-kuma-server");
 const server = UptimeKumaServer.getInstance();
 const io = (module.exports.io = server.io);
+
+// Test hook: resolves to { port } once the HTTP server is listening and
+// background jobs have started. Rejects if the listen call errors while
+// UPTIME_KUMA_TEST=1 (in normal mode the process still exits on listen error).
+module.exports.ready = new Promise((resolve, reject) => {
+    module.exports._resolveReady = resolve;
+    module.exports._rejectReady = reject;
+});
 const app = server.app;
 
 log.debug("server", "Importing Monitor");
@@ -1742,8 +1750,11 @@ let needSetup = false;
 
     server.httpServer.once("error", async (err) => {
         log.error("server", "Cannot listen: " + err.message);
-        await shutdownFunction();
-        process.exit(1);
+        module.exports._rejectReady(err);
+        if (!process.env.UPTIME_KUMA_TEST) {
+            await shutdownFunction();
+            process.exit(1);
+        }
     });
 
     await server.start();
@@ -1757,6 +1768,8 @@ let needSetup = false;
         await initBackgroundJobs();
 
         checkVersion.startInterval();
+
+        module.exports._resolveReady({ port: server.httpServer.address().port });
     });
 
     // Start cloudflared at the end if configured
