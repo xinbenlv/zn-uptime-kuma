@@ -5,8 +5,10 @@ concurrency:
   cancel-in-progress: true
 
 on:
+  # "main" added so the ZN Uptime Kuma CI badge in README.md has live
+  # data on our fork (xinbenlv/zn-uptime-kuma); upstream branches preserved.
   push:
-    branches: [master, 1.23.X, 3.0.0]
+    branches: [master, 1.23.X, 3.0.0, main]
   pull_request:
 permissions: {}
 
