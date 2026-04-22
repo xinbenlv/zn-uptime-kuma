@@ -7,6 +7,7 @@ const { UP, PENDING } = require("../../../src/util");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
 
 const testProto = `
 syntax = "proto3";
@@ -26,18 +27,18 @@ message EchoResponse {
 `;
 
 /**
- * Create a gRPC server for testing
- * @param {number} port Port to listen on
+ * Create a gRPC server for testing. Binds to an OS-assigned ephemeral port
+ * so parallel test runs (or shared CI runners) do not collide on fixed ports.
  * @param {object} methodHandlers Object with method handlers
- * @returns {Promise<grpc.Server>} gRPC server instance
+ * @returns {Promise<{server: grpc.Server, port: number}>} The server and its bound port
  */
-async function createTestGrpcServer(port, methodHandlers) {
-    // Write proto to temp file
+async function createTestGrpcServer(methodHandlers) {
+    // Unique temp path: we don't have the port up front, and parallel tests
+    // must not write the same file concurrently.
     const tmpDir = os.tmpdir();
-    const protoPath = path.join(tmpDir, `test-${port}.proto`);
+    const protoPath = path.join(tmpDir, `test-grpc-${crypto.randomBytes(4).toString("hex")}.proto`);
     fs.writeFileSync(protoPath, testProto);
 
-    // Load proto file
     const packageDefinition = protoLoader.loadSync(protoPath, {
         keepCase: true,
         longs: String,
@@ -50,7 +51,6 @@ async function createTestGrpcServer(port, methodHandlers) {
 
     const server = new grpc.Server();
 
-    // Add service implementation
     server.addService(testPackage.TestService.service, {
         Echo: (call, callback) => {
             if (methodHandlers.Echo) {
@@ -62,17 +62,28 @@ async function createTestGrpcServer(port, methodHandlers) {
     });
 
     return new Promise((resolve, reject) => {
-        server.bindAsync(`0.0.0.0:${port}`, grpc.ServerCredentials.createInsecure(), (err) => {
+        server.bindAsync("127.0.0.1:0", grpc.ServerCredentials.createInsecure(), (err, boundPort) => {
             if (err) {
                 reject(err);
             } else {
                 server.start();
-                // Clean up temp file
                 fs.unlinkSync(protoPath);
-                resolve(server);
+                resolve({ server, port: boundPort });
             }
         });
     });
+}
+
+/**
+ * Obtain a port that is definitely not in use by briefly binding and
+ * releasing a gRPC server on an OS-assigned port. Used by the "unreachable"
+ * case so it doesn't depend on a hard-coded port being free.
+ * @returns {Promise<number>}
+ */
+async function pickClosedPort() {
+    const { server, port } = await createTestGrpcServer({});
+    await new Promise((resolve) => server.tryShutdown(() => resolve()));
+    return port;
 }
 
 describe(
@@ -82,8 +93,7 @@ describe(
     },
     () => {
         test("check() sets status to UP when keyword is found in response", async () => {
-            const port = 50051;
-            const server = await createTestGrpcServer(port, {
+            const { server, port } = await createTestGrpcServer({
                 Echo: (call, callback) => {
                     callback(null, { message: "Hello World with SUCCESS keyword" });
                 },
@@ -118,8 +128,7 @@ describe(
         });
 
         test("check() rejects when keyword is not found in response", async () => {
-            const port = 50052;
-            const server = await createTestGrpcServer(port, {
+            const { server, port } = await createTestGrpcServer({
                 Echo: (call, callback) => {
                     callback(null, { message: "Hello World without the expected keyword" });
                 },
@@ -155,8 +164,7 @@ describe(
         });
 
         test("check() rejects when inverted keyword is present in response", async () => {
-            const port = 50053;
-            const server = await createTestGrpcServer(port, {
+            const { server, port } = await createTestGrpcServer({
                 Echo: (call, callback) => {
                     callback(null, { message: "Response with ERROR keyword" });
                 },
@@ -192,8 +200,7 @@ describe(
         });
 
         test("check() sets status to UP when inverted keyword is not present in response", async () => {
-            const port = 50054;
-            const server = await createTestGrpcServer(port, {
+            const { server, port } = await createTestGrpcServer({
                 Echo: (call, callback) => {
                     callback(null, { message: "Response without error keyword" });
                 },
@@ -228,9 +235,11 @@ describe(
         });
 
         test("check() rejects when gRPC server is unreachable", async () => {
+            const closedPort = await pickClosedPort();
+
             const grpcMonitor = new GrpcKeywordMonitorType();
             const monitor = {
-                grpcUrl: "localhost:50099",
+                grpcUrl: `localhost:${closedPort}`,
                 grpcProtobuf: testProto,
                 grpcServiceName: "test.TestService",
                 grpcMethod: "echo",
@@ -253,10 +262,9 @@ describe(
         });
 
         test("check() truncates long response messages in error output", async () => {
-            const port = 50055;
             const longMessage = "A".repeat(100) + " with SUCCESS keyword";
 
-            const server = await createTestGrpcServer(port, {
+            const { server, port } = await createTestGrpcServer({
                 Echo: (call, callback) => {
                     callback(null, { message: longMessage });
                 },
