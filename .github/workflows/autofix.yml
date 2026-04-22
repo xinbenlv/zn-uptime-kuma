@@ -8,6 +8,11 @@ permissions: {}
 
 jobs:
   autofix:
+    # Skip on forks that don't have the autofix.ci GitHub App installed.
+    # The action fails CI on any repo without the App, and on
+    # narrow-scope forks also fails when its computed fixes touch files
+    # outside the PR's scope.
+    if: github.repository == 'louislam/uptime-kuma'
     runs-on: ubuntu-latest
     permissions:
       contents: read
